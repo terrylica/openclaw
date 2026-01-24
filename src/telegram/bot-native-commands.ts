@@ -6,6 +6,7 @@ import {
   findCommandByNativeName,
   listNativeCommandSpecs,
   listNativeCommandSpecsForConfig,
+  normalizeNativeCommandSpecsForSurface,
   parseCommandArgs,
   resolveCommandArgMenu,
 } from "../auto-reply/commands-registry.js";
@@ -84,13 +85,28 @@ export const registerTelegramNativeCommands = ({
 }: RegisterTelegramNativeCommandsParams) => {
   const skillCommands =
     nativeEnabled && nativeSkillsEnabled ? listSkillCommandsForAgents({ cfg }) : [];
-  const nativeCommands = nativeEnabled
+  const rawNativeCommands = nativeEnabled
     ? listNativeCommandSpecsForConfig(cfg, { skillCommands })
     : [];
+  const nativeCommands = normalizeNativeCommandSpecsForSurface({
+    surface: "telegram",
+    specs: rawNativeCommands,
+  });
   const reservedCommands = new Set(
-    listNativeCommandSpecs().map((command) => command.name.toLowerCase()),
+    normalizeNativeCommandSpecsForSurface({
+      surface: "telegram",
+      specs: listNativeCommandSpecs(),
+    }).map((command) => command.name.toLowerCase()),
   );
-  for (const command of skillCommands) {
+  const reservedSkillSpecs = normalizeNativeCommandSpecsForSurface({
+    surface: "telegram",
+    specs: skillCommands.map((command) => ({
+      name: command.name,
+      description: command.description,
+      acceptsArgs: true,
+    })),
+  });
+  for (const command of reservedSkillSpecs) {
     reservedCommands.add(command.name.toLowerCase());
   }
   const customResolution = resolveTelegramCustomCommands({

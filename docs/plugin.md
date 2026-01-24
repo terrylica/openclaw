@@ -551,6 +551,7 @@ Notes:
 - Commands are registered globally and work across all channels
 - Command names are case-insensitive (`/MyStatus` matches `/mystatus`)
 - Command names must start with a letter and contain only letters, numbers, hyphens, and underscores
+- Telegram native commands only allow `a-z0-9_` (max 32 chars). Use underscores (not hyphens) if you want a plugin command to appear in Telegram’s native command list.
 - Reserved command names (like `help`, `status`, `reset`, etc.) cannot be overridden by plugins
 - Duplicate command registration across plugins will fail with a diagnostic error
 

@@ -8,6 +8,7 @@ import {
   listChatCommandsForConfig,
   listNativeCommandSpecs,
   listNativeCommandSpecsForConfig,
+  normalizeNativeCommandSpecsForSurface,
   normalizeCommandBody,
   parseCommandArgs,
   resolveCommandArgMenu,
@@ -43,6 +44,20 @@ describe("commands registry", () => {
     expect(specs.find((spec) => spec.name === "skill")).toBeTruthy();
     expect(specs.find((spec) => spec.name === "whoami")).toBeTruthy();
     expect(specs.find((spec) => spec.name === "compact")).toBeFalsy();
+  });
+
+  it("normalizes telegram native command specs", () => {
+    const specs = [
+      { name: "OK", description: "Ok", acceptsArgs: false },
+      { name: "bad-name", description: "Bad", acceptsArgs: false },
+      { name: "fine_name", description: "Fine", acceptsArgs: false },
+      { name: "ok", description: "Dup", acceptsArgs: false },
+    ];
+    const normalized = normalizeNativeCommandSpecsForSurface({
+      surface: "telegram",
+      specs,
+    });
+    expect(normalized.map((spec) => spec.name)).toEqual(["ok", "fine_name"]);
   });
 
   it("filters commands based on config flags", () => {

@@ -4,6 +4,10 @@ import { getChatCommands, getNativeCommandSurfaces } from "./commands-registry.d
 import { getPluginCommandSpecs } from "../plugins/commands.js";
 import { DEFAULT_MODEL, DEFAULT_PROVIDER } from "../agents/defaults.js";
 import { resolveConfiguredModelRef } from "../agents/model-selection.js";
+import {
+  normalizeTelegramCommandName,
+  TELEGRAM_COMMAND_NAME_PATTERN,
+} from "../config/telegram-custom-commands.js";
 import type {
   ChatCommandDefinition,
   CommandArgChoiceContext,
@@ -141,6 +145,37 @@ export function listNativeCommandSpecsForConfig(
   const seen = new Set(base.map((spec) => spec.name.toLowerCase()));
   const extras = pluginSpecs.filter((spec) => !seen.has(spec.name.toLowerCase()));
   return extras.length > 0 ? [...base, ...extras] : base;
+}
+
+function normalizeNativeCommandNameForSurface(name: string, surface: string): string | null {
+  const trimmed = name.trim();
+  if (!trimmed) return null;
+  if (surface === "telegram") {
+    const normalized = normalizeTelegramCommandName(trimmed);
+    if (!normalized) return null;
+    if (!TELEGRAM_COMMAND_NAME_PATTERN.test(normalized)) return null;
+    return normalized;
+  }
+  return trimmed;
+}
+
+export function normalizeNativeCommandSpecsForSurface(params: {
+  surface: string;
+  specs: NativeCommandSpec[];
+}): NativeCommandSpec[] {
+  const surface = params.surface.toLowerCase();
+  if (!surface) return params.specs;
+  const normalized: NativeCommandSpec[] = [];
+  const seen = new Set<string>();
+  for (const spec of params.specs) {
+    const normalizedName = normalizeNativeCommandNameForSurface(spec.name, surface);
+    if (!normalizedName) continue;
+    const key = normalizedName.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    normalized.push(normalizedName === spec.name ? spec : { ...spec, name: normalizedName });
+  }
+  return normalized;
 }
 
 export function findCommandByNativeName(name: string): ChatCommandDefinition | undefined {
