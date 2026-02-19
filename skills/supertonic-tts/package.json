@@ -1,0 +1,27 @@
+{
+  "name": "supertonic-tts",
+  "version": "1.0.0",
+  "description": "Supertonic 2 local TTS provider for OpenClaw — OpenAI-compatible HTTP server backed by ONNX inference",
+  "keywords": [
+    "onnx",
+    "openclaw",
+    "supertonic",
+    "tts"
+  ],
+  "license": "MIT",
+  "type": "module",
+  "main": "src/engine.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node tests/run-all.js"
+  },
+  "dependencies": {
+    "onnxruntime-node": "^1.19.2"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "trustedDependencies": [
+    "onnxruntime-node"
+  ]
+}
