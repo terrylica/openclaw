@@ -451,11 +451,13 @@ export async function summarizeText(params: {
           messages: [
             {
               role: "user",
+              // ADR: tts-speech-optimized-summary-prompt — no emoji/markdown, natural spoken language
               content:
-                `You are an assistant that summarizes texts concisely while keeping the most important information. ` +
-                `Summarize the text to approximately ${targetLength} characters. Maintain the original tone and style. ` +
-                `Reply only with the summary, without additional explanations.\n\n` +
-                `<text_to_summarize>\n${text}\n</text_to_summarize>`,
+                `You are preparing text for text-to-speech synthesis. Rewrite the following as a coherent spoken passage of approximately ${targetLength} characters. ` +
+                `Rules: no emoji, no markdown formatting (no bullet points, headers, bold, or asterisks), no URLs, no code blocks. ` +
+                `Use natural spoken language — sentences that sound good when read aloud. ` +
+                `Preserve the key information and meaning. Reply only with the passage, no preamble.\n\n` +
+                `<text_to_convert>\n${text}\n</text_to_convert>`,
               timestamp: Date.now(),
             },
           ],
