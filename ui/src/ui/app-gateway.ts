@@ -24,17 +24,20 @@ import {
   parseExecApprovalResolved,
   removeExecApproval,
 } from "./controllers/exec-approval.ts";
-import { loadHealthState } from "./controllers/health.ts";
 import { loadNodes } from "./controllers/nodes.ts";
 import { loadSessions } from "./controllers/sessions.ts";
-import type { GatewayEventFrame, GatewayHelloOk } from "./gateway.ts";
+import {
+  resolveGatewayErrorDetailCode,
+  type GatewayEventFrame,
+  type GatewayHelloOk,
+} from "./gateway.ts";
 import { GatewayBrowserClient } from "./gateway.ts";
 import type { Tab } from "./navigation.ts";
 import type { UiSettings } from "./storage.ts";
 import type {
   AgentsListResult,
   PresenceEntry,
-  HealthSummary,
+  HealthSnapshot,
   StatusSummary,
   UpdateAvailable,
 } from "./types.ts";
@@ -46,6 +49,7 @@ type GatewayHost = {
   connected: boolean;
   hello: GatewayHelloOk | null;
   lastError: string | null;
+  lastErrorCode: string | null;
   onboarding?: boolean;
   eventLogBuffer: EventLogEntry[];
   eventLog: EventLogEntry[];
@@ -56,10 +60,7 @@ type GatewayHost = {
   agentsLoading: boolean;
   agentsList: AgentsListResult | null;
   agentsError: string | null;
-  healthLoading: boolean;
-  healthResult: HealthSummary | null;
-  healthError: string | null;
-  debugHealth: HealthSummary | null;
+  debugHealth: HealthSnapshot | null;
   assistantName: string;
   assistantAvatar: string | null;
   assistantAgentId: string | null;
@@ -132,6 +133,7 @@ function applySessionDefaults(host: GatewayHost, defaults?: SessionDefaultsSnaps
 
 export function connectGateway(host: GatewayHost) {
   host.lastError = null;
+  host.lastErrorCode = null;
   host.hello = null;
   host.connected = false;
   host.execApprovalQueue = [];
@@ -150,6 +152,7 @@ export function connectGateway(host: GatewayHost) {
       }
       host.connected = true;
       host.lastError = null;
+      host.lastErrorCode = null;
       host.hello = hello;
       applySnapshot(host, hello);
       // Reset orphaned chat run state from before disconnect.
@@ -160,19 +163,28 @@ export function connectGateway(host: GatewayHost) {
       resetToolStream(host as unknown as Parameters<typeof resetToolStream>[0]);
       void loadAssistantIdentity(host as unknown as OpenClawApp);
       void loadAgents(host as unknown as OpenClawApp);
-      void loadHealthState(host as unknown as OpenClawApp);
       void loadNodes(host as unknown as OpenClawApp, { quiet: true });
       void loadDevices(host as unknown as OpenClawApp, { quiet: true });
       void refreshActiveTab(host as unknown as Parameters<typeof refreshActiveTab>[0]);
     },
-    onClose: ({ code, reason }) => {
+    onClose: ({ code, reason, error }) => {
       if (host.client !== client) {
         return;
       }
       host.connected = false;
       // Code 1012 = Service Restart (expected during config saves, don't show as error)
+      host.lastErrorCode =
+        resolveGatewayErrorDetailCode(error) ??
+        (typeof error?.code === "string" ? error.code : null);
       if (code !== 1012) {
+        if (error?.message) {
+          host.lastError = error.message;
+          return;
+        }
         host.lastError = `disconnected (${code}): ${reason || "no reason"}`;
+      } else {
+        host.lastError = null;
+        host.lastErrorCode = null;
       }
     },
     onEvent: (evt) => {
@@ -186,6 +198,7 @@ export function connectGateway(host: GatewayHost) {
         return;
       }
       host.lastError = `event gap detected (expected seq ${expected}, got ${received}); refresh recommended`;
+      host.lastErrorCode = null;
     },
   });
   host.client = client;
@@ -206,7 +219,7 @@ function handleGatewayEventUnsafe(host: GatewayHost, evt: GatewayEventFrame) {
     { ts: Date.now(), event: evt.event, payload: evt.payload },
     ...host.eventLogBuffer,
   ].slice(0, 250);
-  if (host.tab === "debug" || host.tab === "overview") {
+  if (host.tab === "debug") {
     host.eventLog = host.eventLogBuffer;
   }
 
@@ -298,7 +311,7 @@ export function applySnapshot(host: GatewayHost, hello: GatewayHelloOk) {
   const snapshot = hello.snapshot as
     | {
         presence?: PresenceEntry[];
-        health?: HealthSummary;
+        health?: HealthSnapshot;
         sessionDefaults?: SessionDefaultsSnapshot;
         updateAvailable?: UpdateAvailable;
       }
@@ -308,7 +321,6 @@ export function applySnapshot(host: GatewayHost, hello: GatewayHelloOk) {
   }
   if (snapshot?.health) {
     host.debugHealth = snapshot.health;
-    host.healthResult = snapshot.health;
   }
   if (snapshot?.sessionDefaults) {
     applySessionDefaults(host, snapshot.sessionDefaults);
