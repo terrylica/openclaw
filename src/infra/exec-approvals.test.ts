@@ -195,8 +195,8 @@ describe("exec approvals safe shell command builder", () => {
     expect(res.ok).toBe(true);
     // Preserve non-safeBins segment raw (glob stays unquoted)
     expect(res.command).toContain("rg foo src/*.ts");
-    // SafeBins segment is fully quoted
-    expect(res.command).toContain("'head' '-n' '5'");
+    // SafeBins segment is fully quoted and pinned to its resolved absolute path.
+    expect(res.command).toMatch(/'[^']*\/head' '-n' '5'/);
   });
 });
 
@@ -293,6 +293,17 @@ describe("exec approvals command resolution", () => {
     expect(resolution?.rawExecutable).toBe("bash");
     expect(resolution?.executableName.toLowerCase()).toContain("bash");
   });
+
+  it("unwraps nice wrapper argv to resolve the effective executable", () => {
+    const resolution = resolveCommandResolutionFromArgv([
+      "/usr/bin/nice",
+      "bash",
+      "-lc",
+      "echo hi",
+    ]);
+    expect(resolution?.rawExecutable).toBe("bash");
+    expect(resolution?.executableName.toLowerCase()).toContain("bash");
+  });
 });
 
 describe("exec approvals shell parsing", () => {
@@ -342,6 +353,14 @@ describe("exec approvals shell parsing", () => {
       {
         command: "/usr/bin/echo first line\n/usr/bin/echo second line",
         reason: "unsupported shell token: \n",
+      },
+      {
+        command: 'echo "ok $\\\n(id -u)"',
+        reason: "unsupported shell token: newline",
+      },
+      {
+        command: 'echo "ok $\\\r\n(id -u)"',
+        reason: "unsupported shell token: newline",
       },
       {
         command: "ping 127.0.0.1 -n 1 & whoami",
@@ -547,6 +566,17 @@ describe("exec approvals shell allowlist (chained commands)", () => {
       expect(result.analysisOk).toBe(true);
       expect(result.allowlistSatisfied).toBe(true);
     }
+  });
+
+  it("fails allowlist analysis for shell line continuations", () => {
+    const result = evaluateShellAllowlist({
+      command: 'echo "ok $\\\n(id -u)"',
+      allowlist: [{ pattern: "/usr/bin/echo" }],
+      safeBins: new Set(),
+      cwd: "/tmp",
+    });
+    expect(result.analysisOk).toBe(false);
+    expect(result.allowlistSatisfied).toBe(false);
   });
 });
 
@@ -916,6 +946,30 @@ describe("exec approvals safe bins", () => {
       cwd: "/tmp",
     });
     expect(allowed.allowlistSatisfied).toBe(true);
+  });
+
+  it("does not auto-trust PATH-shadowed safe bins without explicit trusted dirs", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const tmp = makeTempDir();
+    const fakeDir = path.join(tmp, "fake-bin");
+    fs.mkdirSync(fakeDir, { recursive: true });
+    const fakeHead = path.join(fakeDir, "head");
+    fs.writeFileSync(fakeHead, "#!/bin/sh\nexit 0\n");
+    fs.chmodSync(fakeHead, 0o755);
+
+    const result = evaluateShellAllowlist({
+      command: "head -n 1",
+      allowlist: [],
+      safeBins: normalizeSafeBins(["head"]),
+      env: makePathEnv(fakeDir),
+      cwd: tmp,
+    });
+    expect(result.analysisOk).toBe(true);
+    expect(result.allowlistSatisfied).toBe(false);
+    expect(result.segmentSatisfiedBy).toEqual([null]);
+    expect(result.segments[0]?.resolution?.resolvedPath).toBe(fakeHead);
   });
 });
 
@@ -1442,5 +1496,94 @@ describe("resolveAllowAlwaysPatterns", () => {
       platform: process.platform,
     });
     expect(patterns).toEqual([whoami]);
+  });
+
+  it("unwraps known dispatch wrappers before shell wrappers", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const dir = makeTempDir();
+    const whoami = makeExecutable(dir, "whoami");
+    const patterns = resolveAllowAlwaysPatterns({
+      segments: [
+        {
+          raw: "/usr/bin/nice /bin/zsh -lc whoami",
+          argv: ["/usr/bin/nice", "/bin/zsh", "-lc", "whoami"],
+          resolution: {
+            rawExecutable: "/usr/bin/nice",
+            resolvedPath: "/usr/bin/nice",
+            executableName: "nice",
+          },
+        },
+      ],
+      cwd: dir,
+      env: makePathEnv(dir),
+      platform: process.platform,
+    });
+    expect(patterns).toEqual([whoami]);
+    expect(patterns).not.toContain("/usr/bin/nice");
+  });
+
+  it("fails closed for unresolved dispatch wrappers", () => {
+    const patterns = resolveAllowAlwaysPatterns({
+      segments: [
+        {
+          raw: "sudo /bin/zsh -lc whoami",
+          argv: ["sudo", "/bin/zsh", "-lc", "whoami"],
+          resolution: {
+            rawExecutable: "sudo",
+            resolvedPath: "/usr/bin/sudo",
+            executableName: "sudo",
+          },
+        },
+      ],
+      platform: process.platform,
+    });
+    expect(patterns).toEqual([]);
+  });
+
+  it("prevents allow-always bypass for dispatch-wrapper + shell-wrapper chains", () => {
+    if (process.platform === "win32") {
+      return;
+    }
+    const dir = makeTempDir();
+    const echo = makeExecutable(dir, "echo");
+    makeExecutable(dir, "id");
+    const safeBins = resolveSafeBins(undefined);
+    const env = makePathEnv(dir);
+
+    const first = evaluateShellAllowlist({
+      command: "/usr/bin/nice /bin/zsh -lc 'echo warmup-ok'",
+      allowlist: [],
+      safeBins,
+      cwd: dir,
+      env,
+      platform: process.platform,
+    });
+    const persisted = resolveAllowAlwaysPatterns({
+      segments: first.segments,
+      cwd: dir,
+      env,
+      platform: process.platform,
+    });
+    expect(persisted).toEqual([echo]);
+
+    const second = evaluateShellAllowlist({
+      command: "/usr/bin/nice /bin/zsh -lc 'id > marker'",
+      allowlist: [{ pattern: echo }],
+      safeBins,
+      cwd: dir,
+      env,
+      platform: process.platform,
+    });
+    expect(second.allowlistSatisfied).toBe(false);
+    expect(
+      requiresExecApproval({
+        ask: "on-miss",
+        security: "allowlist",
+        analysisOk: second.analysisOk,
+        allowlistSatisfied: second.allowlistSatisfied,
+      }),
+    ).toBe(true);
   });
 });
