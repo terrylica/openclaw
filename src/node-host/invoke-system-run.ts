@@ -18,7 +18,9 @@ import {
   type ExecSecurity,
 } from "../infra/exec-approvals.js";
 import type { ExecHostRequest, ExecHostResponse, ExecHostRunResult } from "../infra/exec-host.js";
+import { resolveSafeBinProfiles } from "../infra/exec-safe-bin-policy.js";
 import { getTrustedSafeBinDirs } from "../infra/exec-safe-bin-trust.js";
+import { sanitizeSystemRunEnvOverrides } from "../infra/host-env-security.js";
 import { resolveSystemRunCommand } from "../infra/system-run-command.js";
 import type {
   ExecEventPayload,
@@ -109,8 +111,16 @@ export async function handleSystemRunInvoke(opts: {
   const autoAllowSkills = approvals.agent.autoAllowSkills;
   const sessionKey = opts.params.sessionKey?.trim() || "node";
   const runId = opts.params.runId?.trim() || crypto.randomUUID();
-  const env = opts.sanitizeEnv(opts.params.env ?? undefined);
+  const envOverrides = sanitizeSystemRunEnvOverrides({
+    overrides: opts.params.env ?? undefined,
+    shellWrapper: shellCommand !== null,
+  });
+  const env = opts.sanitizeEnv(envOverrides);
   const safeBins = resolveSafeBins(agentExec?.safeBins ?? cfg.tools?.exec?.safeBins);
+  const safeBinProfiles = resolveSafeBinProfiles({
+    ...cfg.tools?.exec?.safeBinProfiles,
+    ...agentExec?.safeBinProfiles,
+  });
   const trustedSafeBinDirs = getTrustedSafeBinDirs();
   const bins = autoAllowSkills ? await opts.skillBins.current() : new Set<string>();
   let analysisOk = false;
@@ -122,6 +132,7 @@ export async function handleSystemRunInvoke(opts: {
       command: shellCommand,
       allowlist: approvals.allowlist,
       safeBins,
+      safeBinProfiles,
       cwd: opts.params.cwd ?? undefined,
       env,
       trustedSafeBinDirs,
@@ -140,6 +151,7 @@ export async function handleSystemRunInvoke(opts: {
       analysis,
       allowlist: approvals.allowlist,
       safeBins,
+      safeBinProfiles,
       cwd: opts.params.cwd ?? undefined,
       trustedSafeBinDirs,
       skillBins: bins,
@@ -171,7 +183,7 @@ export async function handleSystemRunInvoke(opts: {
       command: argv,
       rawCommand: rawCommand || shellCommand || null,
       cwd: opts.params.cwd ?? null,
-      env: opts.params.env ?? null,
+      env: envOverrides ?? null,
       timeoutMs: opts.params.timeoutMs ?? null,
       needsScreenRecording: opts.params.needsScreenRecording ?? null,
       agentId: agentId ?? null,

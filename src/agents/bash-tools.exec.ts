@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentTool, AgentToolResult } from "@mariozechner/pi-agent-core";
 import { type ExecHost, maxAsk, minSecurity, resolveSafeBins } from "../infra/exec-approvals.js";
+import { resolveSafeBinProfiles } from "../infra/exec-safe-bin-policy.js";
 import { getTrustedSafeBinDirs } from "../infra/exec-safe-bin-trust.js";
 import {
   getShellPathFromLoginShell,
@@ -164,6 +165,13 @@ export function createExecTool(
       : 1800;
   const defaultPathPrepend = normalizePathPrepend(defaults?.pathPrepend);
   const safeBins = resolveSafeBins(defaults?.safeBins);
+  const safeBinProfiles = resolveSafeBinProfiles(defaults?.safeBinProfiles);
+  const unprofiledSafeBins = Array.from(safeBins).filter((entry) => !safeBinProfiles[entry]);
+  if (unprofiledSafeBins.length > 0) {
+    logInfo(
+      `exec: ignoring unprofiled safeBins entries (${unprofiledSafeBins.toSorted().join(", ")}); use allowlist or define tools.exec.safeBinProfiles.<bin>`,
+    );
+  }
   const trustedSafeBinDirs = getTrustedSafeBinDirs();
   const notifyOnExit = defaults?.notifyOnExit !== false;
   const notifyOnExitEmptySuccess = defaults?.notifyOnExitEmptySuccess === true;
@@ -279,7 +287,8 @@ export function createExecTool(
       if (elevatedRequested) {
         logInfo(`exec: elevated command ${truncateMiddle(params.command, 120)}`);
       }
-      const configuredHost = defaults?.host ?? "sandbox";
+      const configuredHost = defaults?.host ?? (defaults?.sandbox ? "sandbox" : "gateway");
+      const sandboxHostConfigured = defaults?.host === "sandbox";
       const requestedHost = normalizeExecHost(params.host) ?? null;
       let host: ExecHost = requestedHost ?? configuredHost;
       if (!elevatedRequested && requestedHost && requestedHost !== configuredHost) {
@@ -307,6 +316,18 @@ export function createExecTool(
       }
 
       const sandbox = host === "sandbox" ? defaults?.sandbox : undefined;
+      if (
+        host === "sandbox" &&
+        !sandbox &&
+        (sandboxHostConfigured || requestedHost === "sandbox")
+      ) {
+        throw new Error(
+          [
+            "exec host=sandbox is configured, but sandbox runtime is unavailable for this session.",
+            'Enable sandbox mode (`agents.defaults.sandbox.mode="non-main"` or `"all"`) or set tools.exec.host to "gateway"/"node".',
+          ].join("\n"),
+        );
+      }
       const rawWorkdir = params.workdir?.trim() || defaults?.cwd || process.cwd();
       let workdir = rawWorkdir;
       let containerWorkdir = sandbox?.containerWorkdir;
@@ -391,6 +412,7 @@ export function createExecTool(
           security,
           ask,
           safeBins,
+          safeBinProfiles,
           agentId,
           sessionKey: defaults?.sessionKey,
           scopeKey: defaults?.scopeKey,

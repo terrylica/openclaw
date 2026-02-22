@@ -4,7 +4,8 @@ import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import type { OpenClawConfig } from "../config/config.js";
 import type { ExecApprovalsResolved } from "../infra/exec-approvals.js";
-import { captureEnv, withEnvAsync } from "../test-utils/env.js";
+import type { SafeBinProfileFixture } from "../infra/exec-safe-bin-policy.js";
+import { captureEnv } from "../test-utils/env.js";
 
 const bundledPluginsDirSnapshot = captureEnv(["OPENCLAW_BUNDLED_PLUGINS_DIR"]);
 
@@ -24,7 +25,7 @@ vi.mock("../infra/shell-env.js", async (importOriginal) => {
   return {
     ...mod,
     getShellPathFromLoginShell: vi.fn(() => null),
-    resolveShellEnvFallbackTimeoutMs: vi.fn(() => 500),
+    resolveShellEnvFallbackTimeoutMs: vi.fn(() => 50),
   };
 });
 
@@ -86,6 +87,7 @@ type ExecTool = {
 async function createSafeBinsExecTool(params: {
   tmpPrefix: string;
   safeBins: string[];
+  safeBinProfiles?: Record<string, SafeBinProfileFixture>;
   files?: Array<{ name: string; contents: string }>;
 }): Promise<{ tmpDir: string; execTool: ExecTool }> {
   const { createOpenClawCodingTools } = await import("./pi-tools.js");
@@ -101,6 +103,7 @@ async function createSafeBinsExecTool(params: {
         security: "allowlist",
         ask: "off",
         safeBins: params.safeBins,
+        safeBinProfiles: params.safeBinProfiles,
       },
     },
   };
@@ -139,22 +142,38 @@ describe("createOpenClawCodingTools safeBins", () => {
       {
         tmpPrefix: "openclaw-safe-bins-",
         safeBins: ["echo"],
+        safeBinProfiles: {
+          echo: { maxPositional: 1 },
+        },
       },
       async ({ tmpDir, execTool }) => {
         const marker = `safe-bins-${Date.now()}`;
-        const result = await withEnvAsync(
-          { OPENCLAW_SHELL_ENV_TIMEOUT_MS: "1000" },
-          async () =>
-            await execTool.execute("call1", {
-              command: `echo ${marker}`,
-              workdir: tmpDir,
-            }),
-        );
+        const result = await execTool.execute("call1", {
+          command: `echo ${marker}`,
+          workdir: tmpDir,
+        });
         const text = result.content.find((content) => content.type === "text")?.text ?? "";
 
         const resultDetails = result.details as { status?: string };
         expect(resultDetails.status).toBe("completed");
         expect(text).toContain(marker);
+      },
+    );
+  });
+
+  it("rejects unprofiled custom safe-bin entries", async () => {
+    await withSafeBinsExecTool(
+      {
+        tmpPrefix: "openclaw-safe-bins-unprofiled-",
+        safeBins: ["echo"],
+      },
+      async ({ tmpDir, execTool }) => {
+        await expect(
+          execTool.execute("call1", {
+            command: "echo hello",
+            workdir: tmpDir,
+          }),
+        ).rejects.toThrow("exec denied: allowlist miss");
       },
     );
   });
@@ -178,10 +197,10 @@ describe("createOpenClawCodingTools safeBins", () => {
     );
   });
 
-  it("does not leak file existence from sort output flags", async () => {
+  it("blocks sort output/compress bypass attempts in safeBins mode", async () => {
     await withSafeBinsExecTool(
       {
-        tmpPrefix: "openclaw-safe-bins-oracle-",
+        tmpPrefix: "openclaw-safe-bins-sort-",
         safeBins: ["sort"],
         files: [{ name: "existing.txt", contents: "x\n" }],
       },
@@ -200,42 +219,21 @@ describe("createOpenClawCodingTools safeBins", () => {
         const existing = await run("sort -o existing.txt");
         const missing = await run("sort -o missing.txt");
         expect(existing).toEqual(missing);
-      },
-    );
-  });
 
-  it("blocks sort output flags from writing files via safeBins", async () => {
-    await withSafeBinsExecTool(
-      {
-        tmpPrefix: "openclaw-safe-bins-sort-",
-        safeBins: ["sort"],
-      },
-      async ({ tmpDir, execTool }) => {
-        const cases = [
+        const outputFlagCases = [
           { command: "sort -oblocked-short.txt", target: "blocked-short.txt" },
           { command: "sort --output=blocked-long.txt", target: "blocked-long.txt" },
         ] as const;
-
-        for (const [index, testCase] of cases.entries()) {
+        for (const [index, testCase] of outputFlagCases.entries()) {
           await expect(
-            execTool.execute(`call${index + 1}`, {
+            execTool.execute(`call-output-${index + 1}`, {
               command: testCase.command,
               workdir: tmpDir,
             }),
           ).rejects.toThrow("exec denied: allowlist miss");
           expect(fs.existsSync(path.join(tmpDir, testCase.target))).toBe(false);
         }
-      },
-    );
-  });
 
-  it("blocks sort --compress-program from bypassing safeBins", async () => {
-    await withSafeBinsExecTool(
-      {
-        tmpPrefix: "openclaw-safe-bins-sort-compress-",
-        safeBins: ["sort"],
-      },
-      async ({ tmpDir, execTool }) => {
         await expect(
           execTool.execute("call1", {
             command: "sort --compress-program=sh",

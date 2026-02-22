@@ -1,9 +1,12 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { emitAgentEvent } from "../infra/agent-events.js";
 import "./test-helpers/fast-core-tools.js";
 import {
   getCallGatewayMock,
+  getSessionsSpawnTool,
   resetSessionsSpawnConfigOverride,
+  setupSessionsSpawnGatewayMock,
+  setSessionsSpawnConfigOverride,
 } from "./openclaw-tools.subagents.sessions-spawn.test-harness.js";
 import { resetSubagentRegistryForTests } from "./subagent-registry.js";
 
@@ -15,22 +18,7 @@ vi.mock("./pi-embedded.js", () => ({
 }));
 
 const callGatewayMock = getCallGatewayMock();
-
-type CreateOpenClawTools = (typeof import("./openclaw-tools.js"))["createOpenClawTools"];
-type CreateOpenClawToolsOpts = Parameters<CreateOpenClawTools>[0];
-
-async function getSessionsSpawnTool(opts: CreateOpenClawToolsOpts) {
-  // Dynamic import: ensure harness mocks are installed before tool modules load.
-  const { createOpenClawTools } = await import("./openclaw-tools.js");
-  const tool = createOpenClawTools(opts).find((candidate) => candidate.name === "sessions_spawn");
-  if (!tool) {
-    throw new Error("missing sessions_spawn tool");
-  }
-  return tool;
-}
-
-type GatewayRequest = { method?: string; params?: unknown };
-type AgentWaitCall = { runId?: string; timeoutMs?: number };
+const RUN_TIMEOUT_SECONDS = 1;
 
 function buildDiscordCleanupHooks(onDelete: (key: string | undefined) => void) {
   return {
@@ -46,112 +34,45 @@ function buildDiscordCleanupHooks(onDelete: (key: string | undefined) => void) {
   };
 }
 
-function setupSessionsSpawnGatewayMock(opts: {
-  includeSessionsList?: boolean;
-  includeChatHistory?: boolean;
-  onAgentSubagentSpawn?: (params: unknown) => void;
-  onSessionsPatch?: (params: unknown) => void;
-  onSessionsDelete?: (params: unknown) => void;
-  agentWaitResult?: { status: "ok" | "timeout"; startedAt: number; endedAt: number };
-}): {
-  calls: Array<GatewayRequest>;
-  waitCalls: Array<AgentWaitCall>;
-  getChild: () => { runId?: string; sessionKey?: string };
-} {
-  const calls: Array<GatewayRequest> = [];
-  const waitCalls: Array<AgentWaitCall> = [];
-  let agentCallCount = 0;
-  let childRunId: string | undefined;
-  let childSessionKey: string | undefined;
-
-  callGatewayMock.mockImplementation(async (optsUnknown: unknown) => {
-    const request = optsUnknown as GatewayRequest;
-    calls.push(request);
-
-    if (request.method === "sessions.list" && opts.includeSessionsList) {
-      return {
-        sessions: [
-          {
-            key: "main",
-            lastChannel: "whatsapp",
-            lastTo: "+123",
-          },
-        ],
-      };
-    }
-
-    if (request.method === "agent") {
-      agentCallCount += 1;
-      const runId = `run-${agentCallCount}`;
-      const params = request.params as { lane?: string; sessionKey?: string } | undefined;
-      // Only capture the first agent call (subagent spawn, not main agent trigger)
-      if (params?.lane === "subagent") {
-        childRunId = runId;
-        childSessionKey = params?.sessionKey ?? "";
-        opts.onAgentSubagentSpawn?.(params);
-      }
-      return {
-        runId,
-        status: "accepted",
-        acceptedAt: 1000 + agentCallCount,
-      };
-    }
-
-    if (request.method === "agent.wait") {
-      const params = request.params as AgentWaitCall | undefined;
-      waitCalls.push(params ?? {});
-      const res = opts.agentWaitResult ?? { status: "ok", startedAt: 1000, endedAt: 2000 };
-      return {
-        runId: params?.runId ?? "run-1",
-        ...res,
-      };
-    }
-
-    if (request.method === "sessions.patch") {
-      opts.onSessionsPatch?.(request.params);
-      return { ok: true };
-    }
-
-    if (request.method === "sessions.delete") {
-      opts.onSessionsDelete?.(request.params);
-      return { ok: true };
-    }
-
-    if (request.method === "chat.history" && opts.includeChatHistory) {
-      return {
-        messages: [
-          {
-            role: "assistant",
-            content: [{ type: "text", text: "done" }],
-          },
-        ],
-      };
-    }
-
-    return {};
-  });
-
-  return {
-    calls,
-    waitCalls,
-    getChild: () => ({ runId: childRunId, sessionKey: childSessionKey }),
-  };
-}
-
-const waitFor = async (predicate: () => boolean, timeoutMs = 2000) => {
+const waitFor = async (predicate: () => boolean, timeoutMs = 1_500) => {
   await vi.waitFor(
     () => {
       expect(predicate()).toBe(true);
     },
-    { timeout: timeoutMs, interval: 10 },
+    { timeout: timeoutMs, interval: 8 },
   );
 };
 
 describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
+  let previousFastTestEnv: string | undefined;
+
   beforeEach(() => {
+    if (previousFastTestEnv === undefined) {
+      previousFastTestEnv = process.env.OPENCLAW_TEST_FAST;
+    }
+    vi.stubEnv("OPENCLAW_TEST_FAST", "1");
     resetSessionsSpawnConfigOverride();
+    setSessionsSpawnConfigOverride({
+      session: {
+        mainKey: "main",
+        scope: "per-sender",
+      },
+      messages: {
+        queue: {
+          debounceMs: 0,
+        },
+      },
+    });
     resetSubagentRegistryForTests();
     callGatewayMock.mockClear();
+  });
+
+  afterAll(() => {
+    if (previousFastTestEnv === undefined) {
+      delete process.env.OPENCLAW_TEST_FAST;
+      return;
+    }
+    process.env.OPENCLAW_TEST_FAST = previousFastTestEnv;
   });
 
   it("sessions_spawn runs cleanup flow after subagent completion", async () => {
@@ -173,7 +94,7 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
 
     const result = await tool.execute("call2", {
       task: "do thing",
-      runTimeoutSeconds: 1,
+      runTimeoutSeconds: RUN_TIMEOUT_SECONDS,
       label: "my-task",
     });
     expect(result.details).toMatchObject({
@@ -240,7 +161,7 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
 
     const result = await tool.execute("call1", {
       task: "do thing",
-      runTimeoutSeconds: 1,
+      runTimeoutSeconds: RUN_TIMEOUT_SECONDS,
       cleanup: "delete",
     });
     expect(result.details).toMatchObject({
@@ -326,7 +247,7 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
 
     const result = await tool.execute("call1b", {
       task: "do thing",
-      runTimeoutSeconds: 1,
+      runTimeoutSeconds: RUN_TIMEOUT_SECONDS,
       cleanup: "delete",
     });
     expect(result.details).toMatchObject({
@@ -368,40 +289,10 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
   });
 
   it("sessions_spawn reports timed out when agent.wait returns timeout", async () => {
-    const calls: Array<{ method?: string; params?: unknown }> = [];
-    let agentCallCount = 0;
-
-    callGatewayMock.mockImplementation(async (opts: unknown) => {
-      const request = opts as { method?: string; params?: unknown };
-      calls.push(request);
-      if (request.method === "agent") {
-        agentCallCount += 1;
-        return {
-          runId: `run-${agentCallCount}`,
-          status: "accepted",
-          acceptedAt: 5000 + agentCallCount,
-        };
-      }
-      if (request.method === "agent.wait") {
-        const params = request.params as { runId?: string } | undefined;
-        return {
-          runId: params?.runId ?? "run-1",
-          status: "timeout",
-          startedAt: 6000,
-          endedAt: 7000,
-        };
-      }
-      if (request.method === "chat.history") {
-        return {
-          messages: [
-            {
-              role: "assistant",
-              content: [{ type: "text", text: "still working" }],
-            },
-          ],
-        };
-      }
-      return {};
+    const ctx = setupSessionsSpawnGatewayMock({
+      includeChatHistory: true,
+      chatHistoryText: "still working",
+      agentWaitResult: { status: "timeout", startedAt: 6000, endedAt: 7000 },
     });
 
     const tool = await getSessionsSpawnTool({
@@ -411,7 +302,7 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
 
     const result = await tool.execute("call-timeout", {
       task: "do thing",
-      runTimeoutSeconds: 1,
+      runTimeoutSeconds: RUN_TIMEOUT_SECONDS,
       cleanup: "keep",
     });
     expect(result.details).toMatchObject({
@@ -419,9 +310,9 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
       runId: "run-1",
     });
 
-    await waitFor(() => calls.filter((call) => call.method === "agent").length >= 2);
+    await waitFor(() => ctx.calls.filter((call) => call.method === "agent").length >= 2);
 
-    const mainAgentCall = calls
+    const mainAgentCall = ctx.calls
       .filter((call) => call.method === "agent")
       .find((call) => {
         const params = call.params as { lane?: string } | undefined;
@@ -434,40 +325,7 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
   });
 
   it("sessions_spawn announces with requester accountId", async () => {
-    const calls: Array<{ method?: string; params?: unknown }> = [];
-    let agentCallCount = 0;
-    let childRunId: string | undefined;
-
-    callGatewayMock.mockImplementation(async (opts: unknown) => {
-      const request = opts as { method?: string; params?: unknown };
-      calls.push(request);
-      if (request.method === "agent") {
-        agentCallCount += 1;
-        const runId = `run-${agentCallCount}`;
-        const params = request.params as { lane?: string; sessionKey?: string } | undefined;
-        if (params?.lane === "subagent") {
-          childRunId = runId;
-        }
-        return {
-          runId,
-          status: "accepted",
-          acceptedAt: 4000 + agentCallCount,
-        };
-      }
-      if (request.method === "agent.wait") {
-        const params = request.params as { runId?: string; timeoutMs?: number } | undefined;
-        return {
-          runId: params?.runId ?? "run-1",
-          status: "ok",
-          startedAt: 1000,
-          endedAt: 2000,
-        };
-      }
-      if (request.method === "sessions.delete" || request.method === "sessions.patch") {
-        return { ok: true };
-      }
-      return {};
-    });
+    const ctx = setupSessionsSpawnGatewayMock({});
 
     const tool = await getSessionsSpawnTool({
       agentSessionKey: "main",
@@ -477,7 +335,7 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
 
     const result = await tool.execute("call-announce-account", {
       task: "do thing",
-      runTimeoutSeconds: 1,
+      runTimeoutSeconds: RUN_TIMEOUT_SECONDS,
       cleanup: "keep",
     });
     expect(result.details).toMatchObject({
@@ -485,13 +343,14 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
       runId: "run-1",
     });
 
-    if (!childRunId) {
+    const child = ctx.getChild();
+    if (!child.runId) {
       throw new Error("missing child runId");
     }
     vi.useFakeTimers();
     try {
       emitAgentEvent({
-        runId: childRunId,
+        runId: child.runId,
         stream: "lifecycle",
         data: {
           phase: "end",
@@ -505,7 +364,7 @@ describe("openclaw-tools: subagents (sessions_spawn lifecycle)", () => {
       vi.useRealTimers();
     }
 
-    const agentCalls = calls.filter((call) => call.method === "agent");
+    const agentCalls = ctx.calls.filter((call) => call.method === "agent");
     expect(agentCalls).toHaveLength(2);
     const announceParams = agentCalls[1]?.params as
       | { accountId?: string; channel?: string; deliver?: boolean }
