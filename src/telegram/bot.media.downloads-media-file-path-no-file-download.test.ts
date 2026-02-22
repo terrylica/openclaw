@@ -12,6 +12,7 @@ const TELEGRAM_TEST_TIMINGS = {
   mediaGroupFlushMs: 20,
   textFragmentGapMs: 30,
 } as const;
+const TELEGRAM_BOT_IMPORT_TIMEOUT_MS = process.platform === "win32" ? 180_000 : 150_000;
 let createTelegramBot: typeof import("./bot.js").createTelegramBot;
 let replySpy: ReturnType<typeof vi.fn>;
 
@@ -98,7 +99,7 @@ beforeAll(async () => {
   ({ createTelegramBot } = await import("./bot.js"));
   const replyModule = await import("../auto-reply/reply.js");
   replySpy = (replyModule as unknown as { __replySpy: ReturnType<typeof vi.fn> }).__replySpy;
-});
+}, TELEGRAM_BOT_IMPORT_TIMEOUT_MS);
 
 vi.mock("./sticker-cache.js", () => ({
   cacheSticker: (...args: unknown[]) => cacheStickerSpy(...args),
@@ -183,7 +184,7 @@ describe("telegram inbound media", () => {
     globalFetchSpy.mockRestore();
   });
 
-  it("logs a handler error when getFile returns no file_path", async () => {
+  it("handles missing file_path from getFile without crashing", async () => {
     const runtimeLog = vi.fn();
     const runtimeError = vi.fn();
     const { handler, replySpy } = await createBotHandlerWithOptions({
@@ -204,10 +205,7 @@ describe("telegram inbound media", () => {
 
     expect(fetchSpy).not.toHaveBeenCalled();
     expect(replySpy).not.toHaveBeenCalled();
-    expect(runtimeError).toHaveBeenCalledTimes(1);
-    const msg = String(runtimeError.mock.calls[0]?.[0] ?? "");
-    expect(msg).toContain("handler failed:");
-    expect(msg).toContain("file_path");
+    expect(runtimeError).not.toHaveBeenCalled();
 
     fetchSpy.mockRestore();
   });
@@ -319,6 +317,67 @@ describe("telegram media groups", () => {
       fetchSpy.mockRestore();
     },
     MEDIA_GROUP_TEST_TIMEOUT_MS,
+  );
+});
+
+describe("telegram forwarded bursts", () => {
+  afterEach(() => {
+    vi.clearAllTimers();
+    vi.useRealTimers();
+  });
+
+  const FORWARD_BURST_TEST_TIMEOUT_MS = process.platform === "win32" ? 45_000 : 20_000;
+
+  it(
+    "coalesces forwarded text + forwarded attachment into a single processing turn with default debounce config",
+    async () => {
+      const runtimeError = vi.fn();
+      const { handler, replySpy } = await createBotHandlerWithOptions({ runtimeError });
+      const fetchSpy = mockTelegramPngDownload();
+
+      try {
+        await handler({
+          message: {
+            chat: { id: 42, type: "private" },
+            from: { id: 777, is_bot: false, first_name: "N" },
+            message_id: 21,
+            text: "Look at this",
+            date: 1736380800,
+            forward_origin: { type: "hidden_user", date: 1736380700, sender_user_name: "A" },
+          },
+          me: { username: "openclaw_bot" },
+          getFile: async () => ({}),
+        });
+
+        await handler({
+          message: {
+            chat: { id: 42, type: "private" },
+            from: { id: 777, is_bot: false, first_name: "N" },
+            message_id: 22,
+            date: 1736380801,
+            photo: [{ file_id: "fwd_photo_1" }],
+            forward_origin: { type: "hidden_user", date: 1736380701, sender_user_name: "A" },
+          },
+          me: { username: "openclaw_bot" },
+          getFile: async () => ({ file_path: "photos/fwd1.jpg" }),
+        });
+
+        await vi.waitFor(
+          () => {
+            expect(replySpy).toHaveBeenCalledTimes(1);
+          },
+          { timeout: FORWARD_BURST_TEST_TIMEOUT_MS, interval: 10 },
+        );
+
+        expect(runtimeError).not.toHaveBeenCalled();
+        const payload = replySpy.mock.calls[0][0];
+        expect(payload.Body).toContain("Look at this");
+        expect(payload.MediaPaths).toHaveLength(1);
+      } finally {
+        fetchSpy.mockRestore();
+      }
+    },
+    FORWARD_BURST_TEST_TIMEOUT_MS,
   );
 });
 

@@ -1,9 +1,8 @@
 import fs from "node:fs";
 import path from "node:path";
 import { beforeEach, describe, expect, it, type MockInstance, vi } from "vitest";
-import { telegramPlugin } from "../../extensions/telegram/src/channel.js";
-import { setTelegramRuntime } from "../../extensions/telegram/src/runtime.js";
 import { withTempHome as withTempHomeBase } from "../../test/helpers/temp-home.js";
+import "../cron/isolated-agent.mocks.js";
 import * as cliRunnerModule from "../agents/cli-runner.js";
 import { loadModelCatalog } from "../agents/model-catalog.js";
 import { runEmbeddedPiAgent } from "../agents/pi-embedded.js";
@@ -12,26 +11,33 @@ import * as configModule from "../config/config.js";
 import * as sessionsModule from "../config/sessions.js";
 import { emitAgentEvent, onAgentEvent } from "../infra/agent-events.js";
 import { setActivePluginRegistry } from "../plugins/runtime.js";
-import { createPluginRuntime } from "../plugins/runtime/index.js";
 import type { RuntimeEnv } from "../runtime.js";
-import { createTestRegistry } from "../test-utils/channel-plugins.js";
+import { createOutboundTestPlugin, createTestRegistry } from "../test-utils/channel-plugins.js";
 import { agentCommand } from "./agent.js";
 
-vi.mock("../agents/pi-embedded.js", () => ({
-  runEmbeddedPiAgent: vi.fn(),
-}));
-
-vi.mock("../agents/model-catalog.js", () => ({
-  loadModelCatalog: vi.fn(),
-}));
-
-vi.mock("../agents/model-selection.js", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../agents/model-selection.js")>();
+vi.mock("../agents/auth-profiles.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../agents/auth-profiles.js")>();
   return {
     ...actual,
-    isCliProvider: vi.fn(() => false),
+    ensureAuthProfileStore: vi.fn(() => ({ version: 1, profiles: {} })),
   };
 });
+
+vi.mock("../agents/workspace.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../agents/workspace.js")>();
+  return {
+    ...actual,
+    ensureAgentWorkspace: vi.fn(async ({ dir }: { dir: string }) => ({ dir })),
+  };
+});
+
+vi.mock("../agents/skills.js", () => ({
+  buildWorkspaceSkillSnapshot: vi.fn(() => undefined),
+}));
+
+vi.mock("../agents/skills/refresh.js", () => ({
+  getSkillsSnapshotVersion: vi.fn(() => 0),
+}));
 
 const runtime: RuntimeEnv = {
   log: vi.fn(),
@@ -72,12 +78,55 @@ function mockConfig(
   });
 }
 
+async function runWithDefaultAgentConfig(params: {
+  home: string;
+  args: Parameters<typeof agentCommand>[0];
+  agentsList?: Array<{ id: string; default?: boolean }>;
+}) {
+  const store = path.join(params.home, "sessions.json");
+  mockConfig(params.home, store, undefined, undefined, params.agentsList);
+  await agentCommand(params.args, runtime);
+  return vi.mocked(runEmbeddedPiAgent).mock.calls.at(-1)?.[0];
+}
+
 function writeSessionStoreSeed(
   storePath: string,
   sessions: Record<string, Record<string, unknown>>,
 ) {
   fs.mkdirSync(path.dirname(storePath), { recursive: true });
   fs.writeFileSync(storePath, JSON.stringify(sessions, null, 2));
+}
+
+function createTelegramOutboundPlugin() {
+  return createOutboundTestPlugin({
+    id: "telegram",
+    outbound: {
+      deliveryMode: "direct",
+      sendText: async (ctx) => {
+        const sendTelegram = ctx.deps?.sendTelegram;
+        if (!sendTelegram) {
+          throw new Error("sendTelegram dependency missing");
+        }
+        const result = await sendTelegram(ctx.to, ctx.text, {
+          accountId: ctx.accountId ?? undefined,
+          verbose: false,
+        });
+        return { channel: "telegram", messageId: result.messageId, chatId: result.chatId };
+      },
+      sendMedia: async (ctx) => {
+        const sendTelegram = ctx.deps?.sendTelegram;
+        if (!sendTelegram) {
+          throw new Error("sendTelegram dependency missing");
+        }
+        const result = await sendTelegram(ctx.to, ctx.text, {
+          accountId: ctx.accountId ?? undefined,
+          mediaUrl: ctx.mediaUrl,
+          verbose: false,
+        });
+        return { channel: "telegram", messageId: result.messageId, chatId: result.chatId };
+      },
+    },
+  });
 }
 
 beforeEach(() => {
@@ -392,12 +441,11 @@ describe("agentCommand", () => {
 
   it("derives session key from --agent when no routing target is provided", async () => {
     await withTempHome(async (home) => {
-      const store = path.join(home, "sessions.json");
-      mockConfig(home, store, undefined, undefined, [{ id: "ops" }]);
-
-      await agentCommand({ message: "hi", agentId: "ops" }, runtime);
-
-      const callArgs = vi.mocked(runEmbeddedPiAgent).mock.calls.at(-1)?.[0];
+      const callArgs = await runWithDefaultAgentConfig({
+        home,
+        args: { message: "hi", agentId: "ops" },
+        agentsList: [{ id: "ops" }],
+      });
       expect(callArgs?.sessionKey).toBe("agent:ops:main");
       expect(callArgs?.sessionFile).toContain(`${path.sep}agents${path.sep}ops${path.sep}sessions`);
     });
@@ -475,9 +523,10 @@ describe("agentCommand", () => {
     await withTempHome(async (home) => {
       const store = path.join(home, "sessions.json");
       mockConfig(home, store, undefined, { botToken: "t-1" });
-      setTelegramRuntime(createPluginRuntime());
       setActivePluginRegistry(
-        createTestRegistry([{ pluginId: "telegram", plugin: telegramPlugin, source: "test" }]),
+        createTestRegistry([
+          { pluginId: "telegram", plugin: createTelegramOutboundPlugin(), source: "test" },
+        ]),
       );
       const deps = {
         sendMessageWhatsApp: vi.fn(),
@@ -564,10 +613,11 @@ describe("agentCommand", () => {
 
   it("logs output when delivery is disabled", async () => {
     await withTempHome(async (home) => {
-      const store = path.join(home, "sessions.json");
-      mockConfig(home, store, undefined, undefined, [{ id: "ops" }]);
-
-      await agentCommand({ message: "hi", agentId: "ops" }, runtime);
+      await runWithDefaultAgentConfig({
+        home,
+        args: { message: "hi", agentId: "ops" },
+        agentsList: [{ id: "ops" }],
+      });
 
       expect(runtime.log).toHaveBeenCalledWith("ok");
     });
