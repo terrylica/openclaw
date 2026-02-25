@@ -1,10 +1,13 @@
+import type { ChatType } from "../../channels/chat-type.js";
 import { getChannelPlugin, normalizeChannelId } from "../../channels/plugins/index.js";
 import type { ChannelOutboundTargetMode } from "../../channels/plugins/types.js";
 import { formatCliCommand } from "../../cli/command-format.js";
 import type { OpenClawConfig } from "../../config/config.js";
 import type { SessionEntry } from "../../config/sessions.js";
 import type { AgentDefaultsConfig } from "../../config/types.agent-defaults.js";
+import { parseDiscordTarget } from "../../discord/targets.js";
 import { normalizeAccountId } from "../../routing/session-key.js";
+import { parseSlackTarget } from "../../slack/targets.js";
 import { parseTelegramTarget } from "../../telegram/targets.js";
 import { deliveryContextFromSession } from "../../utils/delivery-context.js";
 import type {
@@ -62,13 +65,41 @@ export function resolveSessionDeliveryTarget(params: {
   fallbackChannel?: DeliverableMessageChannel;
   allowMismatchedLastTo?: boolean;
   mode?: ChannelOutboundTargetMode;
+  /**
+   * When set, this overrides the session-level `lastChannel` for "last"
+   * resolution.  This prevents cross-channel reply routing when multiple
+   * channels share the same session (dmScope = "main") and an inbound
+   * message from a different channel updates `lastChannel` while an agent
+   * turn is still in flight.
+   *
+   * Callers should set this to the channel that originated the current
+   * agent turn so the reply always routes back to the correct channel.
+   *
+   * @see https://github.com/openclaw/openclaw/issues/24152
+   */
+  turnSourceChannel?: DeliverableMessageChannel;
+  /** Turn-source `to` — paired with `turnSourceChannel`. */
+  turnSourceTo?: string;
+  /** Turn-source `accountId` — paired with `turnSourceChannel`. */
+  turnSourceAccountId?: string;
+  /** Turn-source `threadId` — paired with `turnSourceChannel`. */
+  turnSourceThreadId?: string | number;
 }): SessionDeliveryTarget {
   const context = deliveryContextFromSession(params.entry);
-  const lastChannel =
+  const sessionLastChannel =
     context?.channel && isDeliverableMessageChannel(context.channel) ? context.channel : undefined;
-  const lastTo = context?.to;
-  const lastAccountId = context?.accountId;
-  const lastThreadId = context?.threadId;
+
+  // When a turn-source channel is provided, use it instead of the session's
+  // mutable lastChannel.  This prevents a concurrent inbound from a different
+  // channel from hijacking the reply target (cross-channel privacy leak).
+  const lastChannel = params.turnSourceChannel ?? sessionLastChannel;
+  const lastTo = params.turnSourceChannel ? (params.turnSourceTo ?? context?.to) : context?.to;
+  const lastAccountId = params.turnSourceChannel
+    ? (params.turnSourceAccountId ?? context?.accountId)
+    : context?.accountId;
+  const lastThreadId = params.turnSourceChannel
+    ? (params.turnSourceThreadId ?? context?.threadId)
+    : context?.threadId;
 
   const rawRequested = params.requestedChannel ?? "last";
   const requested = rawRequested === "last" ? "last" : normalizeMessageChannel(rawRequested);
@@ -210,7 +241,7 @@ export function resolveHeartbeatDeliveryTarget(params: {
   const { cfg, entry } = params;
   const heartbeat = params.heartbeat ?? cfg.agents?.defaults?.heartbeat;
   const rawTarget = heartbeat?.target;
-  let target: HeartbeatTarget = "last";
+  let target: HeartbeatTarget = "none";
   if (rawTarget === "none" || rawTarget === "last") {
     target = rawTarget;
   } else if (typeof rawTarget === "string") {
@@ -291,6 +322,20 @@ export function resolveHeartbeatDeliveryTarget(params: {
     };
   }
 
+  const deliveryChatType = resolveHeartbeatDeliveryChatType({
+    channel: resolvedTarget.channel,
+    to: resolved.to,
+  });
+  if (deliveryChatType === "direct") {
+    return {
+      channel: "none",
+      reason: "dm-blocked",
+      accountId: effectiveAccountId,
+      lastChannel: resolvedTarget.lastChannel,
+      lastAccountId: resolvedTarget.lastAccountId,
+    };
+  }
+
   let reason: string | undefined;
   const plugin = getChannelPlugin(resolvedTarget.channel);
   if (plugin?.config.resolveAllowFrom) {
@@ -315,6 +360,59 @@ export function resolveHeartbeatDeliveryTarget(params: {
     lastChannel: resolvedTarget.lastChannel,
     lastAccountId: resolvedTarget.lastAccountId,
   };
+}
+
+function inferChatTypeFromTarget(params: {
+  channel: DeliverableMessageChannel;
+  to: string;
+}): ChatType | undefined {
+  const to = params.to.trim();
+  if (!to) {
+    return undefined;
+  }
+
+  if (/^user:/i.test(to)) {
+    return "direct";
+  }
+  if (/^(channel:|thread:)/i.test(to)) {
+    return "channel";
+  }
+  if (/^group:/i.test(to)) {
+    return "group";
+  }
+
+  switch (params.channel) {
+    case "discord": {
+      try {
+        const target = parseDiscordTarget(to, { defaultKind: "channel" });
+        if (!target) {
+          return undefined;
+        }
+        return target.kind === "user" ? "direct" : "channel";
+      } catch {
+        return undefined;
+      }
+    }
+    case "slack": {
+      const target = parseSlackTarget(to, { defaultKind: "channel" });
+      if (!target) {
+        return undefined;
+      }
+      return target.kind === "user" ? "direct" : "channel";
+    }
+    default:
+      return undefined;
+  }
+}
+
+function resolveHeartbeatDeliveryChatType(params: {
+  channel: DeliverableMessageChannel;
+  to: string;
+}): ChatType | undefined {
+  return inferChatTypeFromTarget({
+    channel: params.channel,
+    to: params.to,
+  });
 }
 
 function resolveHeartbeatSenderId(params: {
