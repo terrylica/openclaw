@@ -1,6 +1,7 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { SafeOpenError, openFileWithinRoot } from "../infra/fs-safe.js";
+import { isNotFoundPathError, isPathInside } from "../infra/path-guards.js";
 import { resolvePreferredOpenClawTmpDir } from "../infra/tmp-openclaw-dir.js";
 
 export const DEFAULT_BROWSER_TMP_DIR = resolvePreferredOpenClawTmpDir();
@@ -30,6 +31,67 @@ export function resolvePathWithinRoot(params: {
   return { ok: true, path: resolved };
 }
 
+export async function resolveWritablePathWithinRoot(params: {
+  rootDir: string;
+  requestedPath: string;
+  scopeLabel: string;
+  defaultFileName?: string;
+}): Promise<{ ok: true; path: string } | { ok: false; error: string }> {
+  const lexical = resolvePathWithinRoot(params);
+  if (!lexical.ok) {
+    return lexical;
+  }
+
+  const invalid = (): { ok: false; error: string } => ({
+    ok: false,
+    error: `Invalid path: must stay within ${params.scopeLabel}`,
+  });
+
+  const rootDir = path.resolve(params.rootDir);
+  let rootRealPath: string;
+  try {
+    const rootLstat = await fs.lstat(rootDir);
+    if (!rootLstat.isDirectory() || rootLstat.isSymbolicLink()) {
+      return invalid();
+    }
+    rootRealPath = await fs.realpath(rootDir);
+  } catch {
+    return invalid();
+  }
+
+  const requestedPath = lexical.path;
+  const parentDir = path.dirname(requestedPath);
+  try {
+    const parentLstat = await fs.lstat(parentDir);
+    if (!parentLstat.isDirectory() || parentLstat.isSymbolicLink()) {
+      return invalid();
+    }
+    const parentRealPath = await fs.realpath(parentDir);
+    if (!isPathInside(rootRealPath, parentRealPath)) {
+      return invalid();
+    }
+  } catch {
+    return invalid();
+  }
+
+  try {
+    const targetLstat = await fs.lstat(requestedPath);
+    if (targetLstat.isSymbolicLink() || !targetLstat.isFile()) {
+      return invalid();
+    }
+    const targetRealPath = await fs.realpath(requestedPath);
+    if (!isPathInside(rootRealPath, targetRealPath)) {
+      return invalid();
+    }
+  } catch (err) {
+    if (!isNotFoundPathError(err)) {
+      return invalid();
+    }
+  }
+
+  return lexical;
+}
+
 export function resolvePathsWithinRoot(params: {
   rootDir: string;
   requestedPaths: string[];
@@ -54,6 +116,29 @@ export async function resolveExistingPathsWithinRoot(params: {
   rootDir: string;
   requestedPaths: string[];
   scopeLabel: string;
+}): Promise<{ ok: true; paths: string[] } | { ok: false; error: string }> {
+  return await resolveCheckedPathsWithinRoot({
+    ...params,
+    allowMissingFallback: true,
+  });
+}
+
+export async function resolveStrictExistingPathsWithinRoot(params: {
+  rootDir: string;
+  requestedPaths: string[];
+  scopeLabel: string;
+}): Promise<{ ok: true; paths: string[] } | { ok: false; error: string }> {
+  return await resolveCheckedPathsWithinRoot({
+    ...params,
+    allowMissingFallback: false,
+  });
+}
+
+async function resolveCheckedPathsWithinRoot(params: {
+  rootDir: string;
+  requestedPaths: string[];
+  scopeLabel: string;
+  allowMissingFallback: boolean;
 }): Promise<{ ok: true; paths: string[] } | { ok: false; error: string }> {
   const rootDir = path.resolve(params.rootDir);
   let rootRealPath: string | undefined;
@@ -119,7 +204,7 @@ export async function resolveExistingPathsWithinRoot(params: {
       });
       resolvedPaths.push(opened.realPath);
     } catch (err) {
-      if (err instanceof SafeOpenError && err.code === "not-found") {
+      if (params.allowMissingFallback && err instanceof SafeOpenError && err.code === "not-found") {
         // Preserve historical behavior for paths that do not exist yet.
         resolvedPaths.push(pathResult.fallbackPath);
         continue;
