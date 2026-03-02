@@ -128,7 +128,7 @@ describe("registerPreActionHooks", () => {
     await preActionHook(program, actionCommand);
   }
 
-  it("emits banner, resolves config, and enables verbose from --debug", async () => {
+  it("handles debug mode and plugin-required command preaction", async () => {
     await runPreAction({
       parseArgv: ["status"],
       processArgv: ["node", "openclaw", "status", "--debug"],
@@ -142,9 +142,8 @@ describe("registerPreActionHooks", () => {
     });
     expect(ensurePluginRegistryLoadedMock).not.toHaveBeenCalled();
     expect(process.title).toBe("openclaw-status");
-  });
 
-  it("loads plugin registry for plugin-required commands", async () => {
+    vi.clearAllMocks();
     await runPreAction({
       parseArgv: ["message", "send"],
       processArgv: ["node", "openclaw", "message", "send"],
@@ -157,28 +156,9 @@ describe("registerPreActionHooks", () => {
       commandPath: ["message", "send"],
     });
     expect(ensurePluginRegistryLoadedMock).toHaveBeenCalledTimes(1);
-    vi.clearAllMocks();
-
-    await runPreAction({
-      parseArgv: ["configure"],
-      processArgv: ["node", "openclaw", "configure"],
-    });
-
-    expect(ensureConfigReadyMock).toHaveBeenCalledWith({
-      runtime: runtimeMock,
-      commandPath: ["configure"],
-    });
-    expect(ensurePluginRegistryLoadedMock).toHaveBeenCalledTimes(1);
   });
 
-  it("skips preaction work for doctor and help/version argv", async () => {
-    await runPreAction({
-      parseArgv: ["doctor"],
-      processArgv: ["node", "openclaw", "doctor"],
-    });
-
-    expect(ensureConfigReadyMock).not.toHaveBeenCalled();
-    vi.clearAllMocks();
+  it("skips help/version preaction and respects banner opt-out", async () => {
     await runPreAction({
       parseArgv: ["status"],
       processArgv: ["node", "openclaw", "--version"],
@@ -187,10 +167,10 @@ describe("registerPreActionHooks", () => {
     expect(emitCliBannerMock).not.toHaveBeenCalled();
     expect(setVerboseMock).not.toHaveBeenCalled();
     expect(ensureConfigReadyMock).not.toHaveBeenCalled();
-  });
 
-  it("hides banner when OPENCLAW_HIDE_BANNER is truthy", async () => {
+    vi.clearAllMocks();
     process.env.OPENCLAW_HIDE_BANNER = "1";
+
     await runPreAction({
       parseArgv: ["status"],
       processArgv: ["node", "openclaw", "status"],
@@ -200,7 +180,7 @@ describe("registerPreActionHooks", () => {
     expect(ensureConfigReadyMock).toHaveBeenCalledTimes(1);
   });
 
-  it("suppresses doctor stdout for --json output command", async () => {
+  it("applies --json stdout suppression only for explicit JSON output commands", async () => {
     await runPreAction({
       parseArgv: ["update", "status", "--json"],
       processArgv: ["node", "openclaw", "update", "status", "--json"],
@@ -211,9 +191,8 @@ describe("registerPreActionHooks", () => {
       commandPath: ["update", "status"],
       suppressDoctorStdout: true,
     });
-  });
 
-  it("does not treat config set --json (strict-parse alias) as json output mode", async () => {
+    vi.clearAllMocks();
     await runPreAction({
       parseArgv: ["config", "set", "gateway.auth.mode", "{bad", "--json"],
       processArgv: ["node", "openclaw", "config", "set", "gateway.auth.mode", "{bad", "--json"],

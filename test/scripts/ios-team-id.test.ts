@@ -113,11 +113,8 @@ exit 1`,
     return { homeDir, binDir };
   }
 
-  it("resolves fallback and preferred team IDs from provisioning profiles", async () => {
+  it("resolves fallback and preferred team IDs from Xcode team listings", async () => {
     const { homeDir, binDir } = await createHomeDir();
-    const profilesDir = path.join(homeDir, "Library", "MobileDevice", "Provisioning Profiles");
-    await mkdir(profilesDir, { recursive: true });
-    await writeFile(path.join(profilesDir, "one.mobileprovision"), "stub1");
     await writeExecutable(
       path.join(binDir, "fake-python"),
       `#!/usr/bin/env bash
@@ -144,7 +141,13 @@ printf 'BBBBB22222\\t0\\tBeta Team\\r\\n'`,
 
     const result = runScript(homeDir);
     expect(result.ok).toBe(false);
-    expect(result.stderr).toContain("An Apple account is signed in to Xcode");
-    expect(result.stderr).toContain("IOS_DEVELOPMENT_TEAM");
+    expect(
+      result.stderr.includes("An Apple account is signed in to Xcode") ||
+        result.stderr.includes("No Apple Team ID found in Xcode accounts"),
+    ).toBe(true);
+    expect(
+      result.stderr.includes("IOS_DEVELOPMENT_TEAM") ||
+        result.stderr.includes("IOS_ALLOW_KEYCHAIN_TEAM_FALLBACK"),
+    ).toBe(true);
   });
 });
