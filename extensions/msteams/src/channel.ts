@@ -16,7 +16,6 @@ import {
   MSTeamsConfigSchema,
   PAIRING_APPROVED_MESSAGE,
 } from "openclaw/plugin-sdk/msteams";
-import { msteamsOnboardingAdapter } from "./onboarding.js";
 import { resolveMSTeamsGroupToolPolicy } from "./policy.js";
 import {
   normalizeMSTeamsMessagingTarget,
@@ -27,6 +26,8 @@ import {
   resolveMSTeamsUserAllowlist,
 } from "./resolve-allowlist.js";
 import { getMSTeamsRuntime } from "./runtime.js";
+import { msteamsSetupAdapter } from "./setup-core.js";
+import { msteamsSetupWizard } from "./setup-surface.js";
 import { resolveMSTeamsCredentials } from "./token.js";
 
 type ResolvedMSTeamsAccount = {
@@ -56,7 +57,7 @@ export const msteamsPlugin: ChannelPlugin<ResolvedMSTeamsAccount> = {
     ...meta,
     aliases: [...meta.aliases],
   },
-  onboarding: msteamsOnboardingAdapter,
+  setupWizard: msteamsSetupWizard,
   pairing: {
     idLabel: "msteamsUserId",
     normalizeAllowEntry: (entry) => entry.replace(/^(msteams|user):/i, ""),
@@ -145,19 +146,7 @@ export const msteamsPlugin: ChannelPlugin<ResolvedMSTeamsAccount> = {
       });
     },
   },
-  setup: {
-    resolveAccountId: () => DEFAULT_ACCOUNT_ID,
-    applyAccountConfig: ({ cfg }) => ({
-      ...cfg,
-      channels: {
-        ...cfg.channels,
-        msteams: {
-          ...cfg.channels?.msteams,
-          enabled: true,
-        },
-      },
-    }),
-  },
+  setup: msteamsSetupAdapter,
   messaging: {
     normalizeTarget: normalizeMSTeamsMessagingTarget,
     targetResolver: {
@@ -377,11 +366,11 @@ export const msteamsPlugin: ChannelPlugin<ResolvedMSTeamsAccount> = {
       }
       return ["poll"] satisfies ChannelMessageActionName[];
     },
-    supportsCards: ({ cfg }) => {
-      return (
-        cfg.channels?.msteams?.enabled !== false &&
+    getCapabilities: ({ cfg }) => {
+      return cfg.channels?.msteams?.enabled !== false &&
         Boolean(resolveMSTeamsCredentials(cfg.channels?.msteams))
-      );
+        ? (["cards"] as const)
+        : [];
     },
     handleAction: async (ctx) => {
       // Handle send action with card parameter
