@@ -1,8 +1,8 @@
+import { createScopedAccountConfigAccessors } from "openclaw/plugin-sdk/channel-config-helpers";
 import {
   buildAccountScopedDmSecurityPolicy,
   collectAllowlistProviderRestrictSendersWarnings,
-  createScopedAccountConfigAccessors,
-} from "openclaw/plugin-sdk/compat";
+} from "openclaw/plugin-sdk/channel-policy";
 import {
   buildChannelConfigSchema,
   DEFAULT_ACCOUNT_ID,
@@ -12,7 +12,7 @@ import {
   setAccountEnabledInConfigSection,
   SignalConfigSchema,
   type ChannelPlugin,
-} from "openclaw/plugin-sdk/signal";
+} from "openclaw/plugin-sdk/signal-core";
 import {
   listSignalAccountIds,
   resolveDefaultSignalAccountId,

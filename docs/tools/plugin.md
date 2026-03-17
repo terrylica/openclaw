@@ -69,6 +69,42 @@ OpenClaw resolves known Claude marketplace names from
 `~/.claude/plugins/known_marketplaces.json`. You can also pass an explicit
 marketplace source with `--marketplace`.
 
+## Conversation binding callbacks
+
+Plugins that bind a conversation can now react when an approval is resolved.
+
+Use `api.onConversationBindingResolved(...)` to receive a callback after a bind
+request is approved or denied:
+
+```ts
+export default {
+  id: "my-plugin",
+  register(api) {
+    api.onConversationBindingResolved(async (event) => {
+      if (event.status === "approved") {
+        // A binding now exists for this plugin + conversation.
+        console.log(event.binding?.conversationId);
+        return;
+      }
+
+      // The request was denied; clear any local pending state.
+      console.log(event.request.conversation.conversationId);
+    });
+  },
+};
+```
+
+Callback payload fields:
+
+- `status`: `"approved"` or `"denied"`
+- `decision`: `"allow-once"`, `"allow-always"`, or `"deny"`
+- `binding`: the resolved binding for approved requests
+- `request`: the original request summary, detach hint, sender id, and
+  conversation metadata
+
+This callback is notification-only. It does not change who is allowed to bind a
+conversation, and it runs after core approval handling finishes.
+
 ## Architecture
 
 OpenClaw's plugin system has four layers:
@@ -113,11 +149,13 @@ That means:
 Examples:
 
 - the bundled `openai` plugin owns OpenAI model-provider behavior and OpenAI
-  speech + media-understanding behavior
+  speech + media-understanding + image-generation behavior
 - the bundled `elevenlabs` plugin owns ElevenLabs speech behavior
 - the bundled `microsoft` plugin owns Microsoft speech behavior
-- the bundled `google`, `minimax`, `mistral`, `moonshot`, and `zai` plugins own
-  their media-understanding backends
+- the bundled `google` plugin owns Google model-provider behavior plus Google
+  media-understanding + image-generation + web-search behavior
+- the bundled `minimax`, `mistral`, `moonshot`, and `zai` plugins own their
+  media-understanding backends
 - the `voice-call` plugin is a feature plugin: it owns call transport, tools,
   CLI, routes, and runtime, but it consumes core TTS/STT capability instead of
   inventing a second speech stack
@@ -169,6 +207,76 @@ For example, TTS follows this shape:
 
 That same pattern should be preferred for future capabilities.
 
+### Multi-capability company plugin example
+
+A company plugin should feel cohesive from the outside. If OpenClaw has shared
+contracts for models, speech, media understanding, and web search, a vendor can
+own all of its surfaces in one place:
+
+```ts
+import type { OpenClawPluginDefinition } from "openclaw/plugin-sdk";
+import {
+  buildOpenAISpeechProvider,
+  createPluginBackedWebSearchProvider,
+  describeImageWithModel,
+  transcribeOpenAiCompatibleAudio,
+} from "openclaw/plugin-sdk";
+
+const plugin: OpenClawPluginDefinition = {
+  id: "exampleai",
+  name: "ExampleAI",
+  register(api) {
+    api.registerProvider({
+      id: "exampleai",
+      // auth/model catalog/runtime hooks
+    });
+
+    api.registerSpeechProvider(
+      buildOpenAISpeechProvider({
+        id: "exampleai",
+        // vendor speech config
+      }),
+    );
+
+    api.registerMediaUnderstandingProvider({
+      id: "exampleai",
+      capabilities: ["image", "audio", "video"],
+      async describeImage(req) {
+        return describeImageWithModel({
+          provider: "exampleai",
+          model: req.model,
+          input: req.input,
+        });
+      },
+      async transcribeAudio(req) {
+        return transcribeOpenAiCompatibleAudio({
+          provider: "exampleai",
+          model: req.model,
+          input: req.input,
+        });
+      },
+    });
+
+    api.registerWebSearchProvider(
+      createPluginBackedWebSearchProvider({
+        id: "exampleai-search",
+        // credential + fetch logic
+      }),
+    );
+  },
+};
+
+export default plugin;
+```
+
+What matters is not the exact helper names. The shape matters:
+
+- one plugin owns the vendor surface
+- core still owns the capability contracts
+- channels and feature plugins consume `api.runtime.*` helpers, not vendor code
+- contract tests can assert that the plugin registered the capabilities it
+  claims to own
+
 ### Capability example: video understanding
 
 OpenClaw already treats image/audio/video understanding as one shared
@@ -186,6 +294,9 @@ the vendor surface; core owns the capability contract and fallback behavior.
 If OpenClaw adds a new domain later, such as video generation, use the same
 sequence again: define the core capability first, then let vendor plugins
 register implementations against it.
+
+Need a concrete rollout checklist? See
+[Capability Cookbook](/tools/capability-cookbook).
 
 ## Compatible bundles
 
@@ -787,6 +898,26 @@ Notes:
 - Returns `{ text: undefined }` when no transcription output is produced (for example skipped/unsupported input).
 - `api.runtime.stt.transcribeAudioFile(...)` remains as a compatibility alias.
 
+Plugins can also launch background subagent runs through `api.runtime.subagent`:
+
+```ts
+const result = await api.runtime.subagent.run({
+  sessionKey: "agent:main:subagent:search-helper",
+  message: "Expand this query into focused follow-up searches.",
+  provider: "openai",
+  model: "gpt-4.1-mini",
+  deliver: false,
+});
+```
+
+Notes:
+
+- `provider` and `model` are optional per-run overrides, not persistent session changes.
+- OpenClaw only honors those override fields for trusted callers.
+- For plugin-owned fallback runs, operators must opt in with `plugins.entries.<id>.subagent.allowModelOverride: true`.
+- Use `plugins.entries.<id>.subagent.allowedModels` to restrict trusted plugins to specific canonical `provider/model` targets, or `"*"` to allow any target explicitly.
+- Untrusted plugin subagent runs still work, but override requests are rejected instead of silently falling back.
+
 For web search, plugins can consume the shared runtime helper instead of
 reaching into the agent tool wiring:
 
@@ -850,8 +981,28 @@ Notes:
 Use SDK subpaths instead of the monolithic `openclaw/plugin-sdk` import when
 authoring plugins:
 
-- `openclaw/plugin-sdk/core` for generic plugin APIs, provider auth types, and shared helpers such as routing/session utilities and logger-backed runtimes.
-- `openclaw/plugin-sdk/compat` for bundled/internal plugin code that needs broader shared runtime helpers than `core`.
+- `openclaw/plugin-sdk/core` for the smallest generic plugin-facing contract.
+- Domain subpaths such as `openclaw/plugin-sdk/channel-config-helpers`,
+  `openclaw/plugin-sdk/channel-config-schema`,
+  `openclaw/plugin-sdk/channel-policy`,
+  `openclaw/plugin-sdk/lazy-runtime`,
+  `openclaw/plugin-sdk/reply-history`,
+  `openclaw/plugin-sdk/routing`,
+  `openclaw/plugin-sdk/runtime-store`, and
+  `openclaw/plugin-sdk/directory-runtime` for shared runtime/config helpers.
+- `openclaw/plugin-sdk/compat` remains as a legacy migration surface for older
+  external plugins. Bundled plugins should not use it, and non-test imports emit
+  a one-time deprecation warning outside test environments.
+- Bundled extension internals remain private. External plugins should use only
+  `openclaw/plugin-sdk/*` subpaths. OpenClaw core/test code may use the repo
+  public seams under `extensions/<id>/index.js`, `api.js`, `runtime-api.js`,
+  `setup-entry.js`, and narrowly scoped files such as `login-qr-api.js`. Never
+  import `extensions/<id>/src/*` from core or from another extension.
+- Repo seam split:
+  `extensions/<id>/api.js` is the helper/types barrel,
+  `extensions/<id>/runtime-api.js` is the runtime-only barrel,
+  `extensions/<id>/index.js` is the bundled plugin entry,
+  and `extensions/<id>/setup-entry.js` is the setup plugin entry.
 - `openclaw/plugin-sdk/telegram` for Telegram channel plugin types and shared channel-facing helpers. Built-in Telegram implementation internals stay private to the bundled extension.
 - `openclaw/plugin-sdk/discord` for Discord channel plugin types and shared channel-facing helpers. Built-in Discord implementation internals stay private to the bundled extension.
 - `openclaw/plugin-sdk/slack` for Slack channel plugin types and shared channel-facing helpers. Built-in Slack implementation internals stay private to the bundled extension.
@@ -912,8 +1063,8 @@ Compatibility note:
 
 - `openclaw/plugin-sdk` remains supported for existing external plugins.
 - New and migrated bundled plugins should use channel or extension-specific
-  subpaths; use `core` for generic surfaces and `compat` only when broader
-  shared helpers are required.
+  subpaths; use `core` plus explicit domain subpaths for generic surfaces, and
+  treat `compat` as migration-only.
 
 ## Read-only channel inspection
 
