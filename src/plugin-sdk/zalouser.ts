@@ -68,8 +68,10 @@ export { issuePairingChallenge } from "../pairing/pairing-challenge.js";
 export { buildChannelSendResult } from "./channel-send-result.js";
 export type { OutboundReplyPayload } from "./reply-payload.js";
 export {
+  deliverTextOrMediaReply,
   isNumericTargetId,
   resolveOutboundMediaUrls,
+  resolveSendableOutboundReplyParts,
   sendMediaWithLeadingCaption,
   sendPayloadWithChunkedTextAndMedia,
 } from "./reply-payload.js";
