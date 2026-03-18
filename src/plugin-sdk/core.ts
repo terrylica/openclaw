@@ -1,5 +1,11 @@
+import type {
+  ChannelMessagingAdapter,
+  ChannelOutboundSessionRoute,
+} from "../channels/plugins/types.core.js";
 import type { ChannelPlugin } from "../channels/plugins/types.plugin.js";
 import { getChatChannelMeta } from "../channels/registry.js";
+import type { OpenClawConfig } from "../config/config.js";
+import { buildOutboundBaseSessionKey } from "../infra/outbound/base-session-key.js";
 import { emptyPluginConfigSchema } from "../plugins/config-schema.js";
 import type { PluginRuntime } from "../plugins/runtime/types.js";
 import type {
@@ -38,6 +44,7 @@ export type {
   ProviderThinkingPolicyContext,
   ProviderWrapStreamFnContext,
   OpenClawPluginService,
+  OpenClawPluginServiceContext,
   ProviderAuthContext,
   ProviderAuthDoctorHintContext,
   ProviderAuthMethodNonInteractiveContext,
@@ -45,10 +52,16 @@ export type {
   ProviderAuthResult,
   OpenClawPluginCommandDefinition,
   OpenClawPluginDefinition,
+  PluginLogger,
   PluginInteractiveTelegramHandlerContext,
 } from "../plugins/types.js";
 export type { OpenClawConfig } from "../config/config.js";
+export { isSecretRef } from "../config/types.secrets.js";
 export type { GatewayRequestHandlerOptions } from "../gateway/server-methods/types.js";
+export type {
+  ChannelOutboundSessionRoute,
+  ChannelMessagingAdapter,
+} from "../channels/plugins/types.core.js";
 export type {
   ProviderUsageSnapshot,
   UsageProviderId,
@@ -60,6 +73,7 @@ export type { OpenClawPluginApi } from "../plugins/types.js";
 export type { PluginRuntime } from "../plugins/runtime/types.js";
 
 export { emptyPluginConfigSchema } from "../plugins/config-schema.js";
+export { delegateCompactionToRuntime } from "../context-engine/delegate.js";
 export { DEFAULT_ACCOUNT_ID, normalizeAccountId } from "../routing/session-key.js";
 export { buildChannelConfigSchema } from "../channels/plugins/config-schema.js";
 export {
@@ -70,7 +84,10 @@ export {
   deleteAccountFromConfigSection,
   setAccountEnabledInConfigSection,
 } from "../channels/plugins/config-helpers.js";
-export { formatPairingApproveHint } from "../channels/plugins/helpers.js";
+export {
+  formatPairingApproveHint,
+  parseOptionalDelimitedEntries,
+} from "../channels/plugins/helpers.js";
 export { getChatChannelMeta } from "../channels/registry.js";
 export { buildOauthProviderAuthResult } from "./provider-auth-result.js";
 export {
@@ -89,6 +106,7 @@ export type { SecretFileReadOptions, SecretFileReadResult } from "../infra/secre
 
 export { resolveGatewayBindUrl } from "../shared/gateway-bind-url.js";
 export type { GatewayBindUrlResult } from "../shared/gateway-bind-url.js";
+export { normalizeAtHashSlug, normalizeHyphenSlug } from "../shared/string-normalization.js";
 
 export { resolveTailnetHostWithRunner } from "../shared/tailscale-status.js";
 export type {
@@ -103,6 +121,54 @@ export {
 export { buildOutboundBaseSessionKey } from "../infra/outbound/base-session-key.js";
 export { normalizeOutboundThreadId } from "../infra/outbound/thread-id.js";
 export { resolveThreadSessionKeys } from "../routing/session-key.js";
+
+export type ChannelOutboundSessionRouteParams = Parameters<
+  NonNullable<ChannelMessagingAdapter["resolveOutboundSessionRoute"]>
+>[0];
+
+export function stripChannelTargetPrefix(raw: string, ...providers: string[]): string {
+  const trimmed = raw.trim();
+  for (const provider of providers) {
+    const prefix = `${provider.toLowerCase()}:`;
+    if (trimmed.toLowerCase().startsWith(prefix)) {
+      return trimmed.slice(prefix.length).trim();
+    }
+  }
+  return trimmed;
+}
+
+export function stripTargetKindPrefix(raw: string): string {
+  return raw.replace(/^(user|channel|group|conversation|room|dm):/i, "").trim();
+}
+
+export function buildChannelOutboundSessionRoute(params: {
+  cfg: OpenClawConfig;
+  agentId: string;
+  channel: string;
+  accountId?: string | null;
+  peer: { kind: "direct" | "group" | "channel"; id: string };
+  chatType: "direct" | "group" | "channel";
+  from: string;
+  to: string;
+  threadId?: string | number;
+}): ChannelOutboundSessionRoute {
+  const baseSessionKey = buildOutboundBaseSessionKey({
+    cfg: params.cfg,
+    agentId: params.agentId,
+    channel: params.channel,
+    accountId: params.accountId,
+    peer: params.peer,
+  });
+  return {
+    sessionKey: baseSessionKey,
+    baseSessionKey,
+    peer: params.peer,
+    chatType: params.chatType,
+    from: params.from,
+    to: params.to,
+    ...(params.threadId !== undefined ? { threadId: params.threadId } : {}),
+  };
+}
 
 type DefineChannelPluginEntryOptions<TPlugin extends ChannelPlugin = ChannelPlugin> = {
   id: string;
